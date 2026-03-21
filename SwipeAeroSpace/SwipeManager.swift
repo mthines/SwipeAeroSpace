@@ -91,14 +91,18 @@ class SwipeManager {
     @AppStorage("natrual") private var naturalSwipe: Bool = true
     @AppStorage("skip-empty") private var skipEmpty: Bool = false
     @AppStorage("fingers") private var fingers: String = "Three"
+    @AppStorage("multiSwipe") private var multiSwipeEnabled: Bool = true
+    @AppStorage("maxSteps") private var maxSteps: Int = 5
 
     var socketInfo = SocketInfo()
 
     private var eventTap: CFMachPort? = nil
     private var accDisX: Float = 0
+    private var firedPosition: Int = 0
     private var prevTouchPositions: [String: NSPoint] = [:]
     private var state: GestureState = .ended
     private var socket: Socket? = nil
+    private let workQueue = DispatchQueue(label: "swipe.workspace", qos: .userInteractive)
 
     private var logger: Logger = Logger(
         subsystem: Bundle.main.bundleIdentifier!,
@@ -318,17 +322,53 @@ class SwipeManager {
         }
         if state == .began {
             accDisX += horizontalSwipeDistance(touches: touches)
+
+            // Fire workspace switches live as each threshold is crossed
+            if multiSwipeEnabled {
+                let threshold = Float(swipeThreshold)
+                // Signed position: negative = swiped left, positive = swiped right
+                let rawPosition = Int(accDisX / threshold)
+                let targetPosition = max(-maxSteps, min(maxSteps, rawPosition))
+                let delta = targetPosition - firedPosition
+
+                if delta != 0 {
+                    let direction: Direction
+                    if delta > 0 {
+                        direction = naturalSwipe ? .prev : .next
+                    } else {
+                        direction = naturalSwipe ? .next : .prev
+                    }
+                    let stepsToFire = abs(delta)
+                    firedPosition = targetPosition
+                    workQueue.async { [weak self] in
+                        guard let self = self else { return }
+                        for _ in 0..<stepsToFire {
+                            switch self.switchWorkspace(direction: direction) {
+                            case .success: continue
+                            case .failure(let err):
+                                self.logger.error("\(err.localizedDescription)")
+                                return
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
     private func clearEventState() {
         accDisX = 0
+        firedPosition = 0
         prevTouchPositions.removeAll()
     }
 
     private func handleGesture() {
-        // filter
-        if abs(accDisX) < Float(swipeThreshold) {
+        // If multi-swipe is enabled, switches already fired live during the gesture
+        if multiSwipeEnabled {
+            return
+        }
+        let threshold = Float(swipeThreshold)
+        if abs(accDisX) < threshold {
             return
         }
         let direction: Direction =
@@ -337,9 +377,13 @@ class SwipeManager {
             } else {
                 accDisX < 0 ? .prev : .next
             }
-        switch switchWorkspace(direction: direction) {
-        case .success: return
-        case .failure(let err): logger.error("\(err.localizedDescription)")
+        workQueue.async { [weak self] in
+            guard let self = self else { return }
+            switch self.switchWorkspace(direction: direction) {
+            case .success: return
+            case .failure(let err):
+                self.logger.error("\(err.localizedDescription)")
+            }
         }
     }
 

@@ -6,6 +6,8 @@ struct SettingsView: View {
     @AppStorage("natrual") private var naturalSwipe: Bool = true
     @AppStorage("skip-empty") private var skipEmpty: Bool = false
     @AppStorage("fingers") private var fingers: String = "Three"
+    @AppStorage("multiSwipe") private var multiSwipeEnabled: Bool = true
+    @AppStorage("maxSteps") private var maxSteps: Int = 5
 
     @State private var numberFormatter: NumberFormatter = {
         var nf = NumberFormatter()
@@ -71,6 +73,25 @@ struct SettingsView: View {
                 Text("Enable to skip empty workspaces").foregroundStyle(
                     .secondary
                 )
+            }.padding(.vertical, 4)
+
+            VStack(alignment: .leading) {
+                Toggle("Multi-Workspace Swipe", isOn: $multiSwipeEnabled)
+                Text("Longer swipes jump multiple workspaces at once")
+                    .foregroundStyle(.secondary)
+                if multiSwipeEnabled {
+                    HStack {
+                        Text("Max workspaces per swipe: \(maxSteps)")
+                        Slider(
+                            value: Binding(
+                                get: { Double(maxSteps) },
+                                set: { maxSteps = Int($0) }
+                            ),
+                            in: 2...9,
+                            step: 1
+                        ).frame(maxWidth: 200)
+                    }.padding(.top, 4)
+                }
             }.padding(.vertical, 4)
 
             LaunchAtLogin.Toggle {
