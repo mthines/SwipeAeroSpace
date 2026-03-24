@@ -16,12 +16,11 @@ struct WindowInfo: Identifiable {
 struct WorkspaceOverlayView: View {
     let workspaces: [WorkspaceInfo]
     let onSelect: (String) -> Void
+    let onPreview: (String) -> Void
     let onDismiss: () -> Void
     @State private var appeared = false
-
-    private var columnCount: Int {
-        min(workspaces.count, 5)
-    }
+    @State private var hoveredWorkspace: String? = nil
+    @State private var revertTask: DispatchWorkItem? = nil
 
     private let maxColumns = 5
 
@@ -41,8 +40,27 @@ struct WorkspaceOverlayView: View {
                 ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
                     HStack(alignment: .top, spacing: 10) {
                         ForEach(row) { ws in
-                            WorkspaceCard(workspace: ws)
-                                .onTapGesture { onSelect(ws.id) }
+                            WorkspaceCard(
+                                workspace: ws,
+                                isHoveredExternally: hoveredWorkspace == ws.id
+                            )
+                            .onTapGesture { onSelect(ws.id) }
+                            .onHover { hovering in
+                                if hovering {
+                                    revertTask?.cancel()
+                                    revertTask = nil
+                                    hoveredWorkspace = ws.id
+                                    onPreview(ws.id)
+                                } else if hoveredWorkspace == ws.id {
+                                    hoveredWorkspace = nil
+                                    let task = DispatchWorkItem {
+                                        onDismiss()
+                                    }
+                                    revertTask = task
+                                    DispatchQueue.main.asyncAfter(
+                                        deadline: .now() + 0.08, execute: task)
+                                }
+                            }
                         }
                     }
                 }
@@ -66,7 +84,10 @@ struct WorkspaceOverlayView: View {
 
 struct WorkspaceCard: View {
     let workspace: WorkspaceInfo
+    var isHoveredExternally: Bool = false
     @State private var isHovered = false
+
+    private var highlighted: Bool { isHovered || isHoveredExternally }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -82,7 +103,7 @@ struct WorkspaceCard: View {
             }
 
             Rectangle()
-                .fill(Color.white.opacity(isHovered ? 0.3 : 0.15))
+                .fill(Color.white.opacity(highlighted ? 0.3 : 0.15))
                 .frame(height: 1)
 
             if workspace.windows.isEmpty {
@@ -110,17 +131,17 @@ struct WorkspaceCard: View {
         .padding(10)
         .background(
             workspace.isFocused
-                ? Color.accentColor.opacity(isHovered ? 0.35 : 0.15)
-                : Color.white.opacity(isHovered ? 0.15 : 0.05)
+                ? Color.accentColor.opacity(highlighted ? 0.35 : 0.15)
+                : Color.white.opacity(highlighted ? 0.25 : 0.05)
         )
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .overlay(
             RoundedRectangle(cornerRadius: 10)
-                .stroke(Color.white.opacity(isHovered ? 0.5 : 0), lineWidth: 2)
+                .stroke(Color.white.opacity(highlighted ? 0.5 : 0), lineWidth: 2)
         )
-        .scaleEffect(isHovered ? 1.03 : 1.0)
-        .shadow(color: .accentColor.opacity(isHovered ? 0.2 : 0), radius: 8)
-        .animation(.easeOut(duration: 0.08), value: isHovered)
+        .scaleEffect(highlighted ? 1.03 : 1.0)
+        .shadow(color: .accentColor.opacity(highlighted ? 0.2 : 0), radius: 8)
+        .animation(.easeOut(duration: 0.08), value: highlighted)
         .onHover { hovering in
             isHovered = hovering
         }
@@ -140,20 +161,32 @@ class OverlayPanelController {
     private var panel: NSPanel?
     private var localMonitor: Any?
     private var globalMonitor: Any?
+    private var onDismissCallback: (() -> Void)?
 
-    func show(workspaces: [WorkspaceInfo], onSelect: @escaping (String) -> Void) {
+    func show(
+        workspaces: [WorkspaceInfo],
+        onSelect: @escaping (String) -> Void,
+        onPreview: @escaping (String) -> Void,
+        onRevert: @escaping () -> Void
+    ) {
         dismiss()
 
         let view = WorkspaceOverlayView(
             workspaces: workspaces,
             onSelect: { [weak self] ws in
+                self?.onDismissCallback = nil  // Don't revert on select
                 onSelect(ws)
                 self?.dismiss()
             },
-            onDismiss: { [weak self] in
-                self?.dismiss()
+            onPreview: { ws in
+                onPreview(ws)
+            },
+            onDismiss: {
+                onRevert()
             }
         )
+
+        self.onDismissCallback = onRevert
 
         let hostingView = NSHostingView(rootView: view)
 
@@ -232,6 +265,8 @@ class OverlayPanelController {
     }
 
     func dismiss() {
+        onDismissCallback?()
+        onDismissCallback = nil
         panel?.orderOut(nil)
         panel = nil
         if let localMonitor = localMonitor {

@@ -174,12 +174,27 @@ class SwipeManager {
         workQueue.async { [weak self] in
             guard let self = self else { return }
             let workspaces = self.queryWorkspaces()
+            let originalWs = workspaces.first(where: { $0.isFocused })?.id
             DispatchQueue.main.async {
-                self.overlayController.show(workspaces: workspaces) { [weak self] wsName in
-                    self?.workQueue.async {
-                        _ = self?.runCommand(args: ["workspace", wsName], stdin: "")
+                self.overlayController.show(
+                    workspaces: workspaces,
+                    onSelect: { [weak self] wsName in
+                        self?.workQueue.async {
+                            _ = self?.runCommand(args: ["workspace", wsName], stdin: "")
+                        }
+                    },
+                    onPreview: { [weak self] wsName in
+                        self?.workQueue.async {
+                            _ = self?.runCommand(args: ["workspace", wsName], stdin: "")
+                        }
+                    },
+                    onRevert: { [weak self] in
+                        guard let originalWs = originalWs else { return }
+                        self?.workQueue.async {
+                            _ = self?.runCommand(args: ["workspace", originalWs], stdin: "")
+                        }
                     }
-                }
+                )
             }
         }
     }
