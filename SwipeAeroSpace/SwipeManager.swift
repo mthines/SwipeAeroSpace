@@ -25,6 +25,12 @@ enum GestureState {
     case cancelled
 }
 
+enum SwipeAxis {
+    case undecided
+    case horizontal
+    case vertical
+}
+
 enum SwipeError: Error {
     case SocketError(String)
     case CommandFail(String)
@@ -93,16 +99,22 @@ class SwipeManager {
     @AppStorage("fingers") private var fingers: String = "Three"
     @AppStorage("multiSwipe") private var multiSwipeEnabled: Bool = true
     @AppStorage("maxSteps") private var maxSteps: Int = 5
+    @AppStorage("swipeUpOverview") private var swipeUpOverviewEnabled: Bool = true
+    @AppStorage("swipeUpFingers") private var swipeUpFingers: String = "Three"
 
     var socketInfo = SocketInfo()
 
     private var eventTap: CFMachPort? = nil
     private var accDisX: Float = 0
+    private var accDisY: Float = 0
+    private var swipeUpFired: Bool = false
     private var firedPosition: Int = 0
     private var prevTouchPositions: [String: NSPoint] = [:]
     private var state: GestureState = .ended
+    private var swipeAxis: SwipeAxis = .undecided
     private var socket: Socket? = nil
     private let workQueue = DispatchQueue(label: "swipe.workspace", qos: .userInteractive)
+    private let overlayController = OverlayPanelController()
 
     private var logger: Logger = Logger(
         subsystem: Bundle.main.bundleIdentifier!,
@@ -156,6 +168,70 @@ class SwipeManager {
             "list-workspaces", "--monitor", "focused", "--empty", "no",
         ]
         return runCommand(args: args, stdin: "")
+    }
+
+    func showWorkspaceOverview() {
+        workQueue.async { [weak self] in
+            guard let self = self else { return }
+            let workspaces = self.queryWorkspaces()
+            DispatchQueue.main.async {
+                self.overlayController.show(workspaces: workspaces) { [weak self] wsName in
+                    self?.workQueue.async {
+                        _ = self?.runCommand(args: ["workspace", wsName], stdin: "")
+                    }
+                }
+            }
+        }
+    }
+
+    private func queryWorkspaces() -> [WorkspaceInfo] {
+        // Get focused workspace
+        let focusedResult = runCommand(
+            args: ["list-workspaces", "--focused"], stdin: ""
+        )
+        let focusedWs = (try? focusedResult.get())?.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        ) ?? ""
+
+        // Get all non-empty workspaces on all monitors
+        let allResult = runCommand(
+            args: ["list-workspaces", "--monitor", "all", "--empty", "no"],
+            stdin: ""
+        )
+        guard let allOutput = try? allResult.get() else { return [] }
+        let wsNames = allOutput.split(separator: "\n").map(String.init)
+
+        return wsNames.compactMap { wsName in
+            let winResult = runCommand(
+                args: [
+                    "list-windows", "--workspace", wsName,
+                    "--format", "%{app-name}|%{window-title}",
+                ],
+                stdin: ""
+            )
+            let windows: [WindowInfo]
+            if let winOutput = try? winResult.get(),
+                !winOutput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            {
+                windows = winOutput.split(separator: "\n").enumerated().map {
+                    idx, line in
+                    let parts = line.split(separator: "|", maxSplits: 1)
+                    return WindowInfo(
+                        id: "\(wsName)-\(idx)",
+                        appName: parts.first.map(String.init) ?? "Unknown",
+                        windowTitle: parts.count > 1
+                            ? String(parts[1]) : ""
+                    )
+                }
+            } else {
+                windows = []
+            }
+            return WorkspaceInfo(
+                id: wsName,
+                windows: windows,
+                isFocused: wsName == focusedWs
+            )
+        }
     }
 
     @discardableResult
@@ -310,23 +386,45 @@ class SwipeManager {
     private func stopGesture() {
         if state == .began {
             state = .ended
-            handleGesture()
+            if swipeAxis != .vertical {
+                handleGesture()
+            }
             clearEventState()
         }
     }
 
     private func processTouches(touches: Set<NSTouch>, count: Int) {
-        let finger_count = fingers == "Three" ? 3 : 4
-        if state != .began && count == finger_count {
+        let hFingerCount = fingers == "Three" ? 3 : 4
+        let vFingerCount = swipeUpFingers == "Three" ? 3 : 4
+        if state != .began && (count == hFingerCount || count == vFingerCount) {
             state = .began
         }
         if state == .began {
-            accDisX += horizontalSwipeDistance(touches: touches)
+            let (disX, disY) = swipeDistance(touches: touches)
+            accDisX += disX
+            accDisY += disY
 
-            // Fire workspace switches live as each threshold is crossed
-            if multiSwipeEnabled {
+            // Lock axis once we have enough movement
+            if swipeAxis == .undecided {
+                let threshold = Float(swipeThreshold) * 0.3
+                if abs(accDisX) > threshold || abs(accDisY) > threshold {
+                    swipeAxis =
+                        abs(accDisY) > abs(accDisX) ? .vertical : .horizontal
+                }
+            }
+
+            // Fire swipe-up overview as soon as threshold is crossed
+            if swipeAxis == .vertical && !swipeUpFired && swipeUpOverviewEnabled {
+                let threshold = Float(swipeThreshold) * 0.5
+                if accDisY > threshold {
+                    swipeUpFired = true
+                    showWorkspaceOverview()
+                }
+            }
+
+            // Only fire horizontal workspace switches for horizontal swipes
+            if swipeAxis == .horizontal && multiSwipeEnabled {
                 let threshold = Float(swipeThreshold)
-                // Signed position: negative = swiped left, positive = swiped right
                 let rawPosition = Int(accDisX / threshold)
                 let targetPosition = max(-maxSteps, min(maxSteps, rawPosition))
                 let delta = targetPosition - firedPosition
@@ -358,7 +456,10 @@ class SwipeManager {
 
     private func clearEventState() {
         accDisX = 0
+        accDisY = 0
         firedPosition = 0
+        swipeUpFired = false
+        swipeAxis = .undecided
         prevTouchPositions.removeAll()
     }
 
@@ -387,15 +488,19 @@ class SwipeManager {
         }
     }
 
-    private func horizontalSwipeDistance(touches: Set<NSTouch>) -> Float {
+    private func swipeDistance(touches: Set<NSTouch>) -> (Float, Float) {
         var allRight = true
         var allLeft = true
+        var allUp = true
+        var allDown = true
         var sumDisX = Float(0)
         var sumDisY = Float(0)
         for touch in touches {
             let (disX, disY) = touchDistance(touch)
             allRight = allRight && disX >= 0
             allLeft = allLeft && disX <= 0
+            allUp = allUp && disY >= 0
+            allDown = allDown && disY <= 0
             sumDisX += disX
             sumDisY += disY
 
@@ -406,17 +511,19 @@ class SwipeManager {
                     touch.normalizedPosition
             }
         }
-        // All fingers should move in the same direction.
+
+        var resultX = sumDisX
+        var resultY = sumDisY
+
+        // All fingers should move in the same direction for each axis.
         if !allRight && !allLeft {
-            return 0
+            resultX = 0
+        }
+        if !allUp && !allDown {
+            resultY = 0
         }
 
-        // Only horizontal swipes are interesting.
-        if abs(sumDisX) <= abs(sumDisY) {
-            return 0
-        }
-
-        return sumDisX
+        return (resultX, resultY)
     }
 
     private func touchDistance(_ touch: NSTouch) -> (Float, Float) {

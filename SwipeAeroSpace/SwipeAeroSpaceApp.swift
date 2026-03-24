@@ -50,6 +50,10 @@ struct SwipeAeroSpaceApp: App {
             image: "MenubarIcon",
             isInserted: $menuBarExtraIsInserted
         ) {
+            Button("Workspace Overview") {
+                swipeManager.showWorkspaceOverview()
+            }
+            Divider()
             Button("Next Workspace") {
                 swipeManager.nextWorkspace()
             }

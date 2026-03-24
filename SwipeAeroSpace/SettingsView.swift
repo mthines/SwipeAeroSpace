@@ -8,6 +8,8 @@ struct SettingsView: View {
     @AppStorage("fingers") private var fingers: String = "Three"
     @AppStorage("multiSwipe") private var multiSwipeEnabled: Bool = true
     @AppStorage("maxSteps") private var maxSteps: Int = 5
+    @AppStorage("swipeUpOverview") private var swipeUpOverviewEnabled: Bool = true
+    @AppStorage("swipeUpFingers") private var swipeUpFingers: String = "Three"
 
     @State private var numberFormatter: NumberFormatter = {
         var nf = NumberFormatter()
@@ -91,6 +93,22 @@ struct SettingsView: View {
                             step: 1
                         ).frame(maxWidth: 200)
                     }.padding(.top, 4)
+                }
+            }.padding(.vertical, 4)
+
+            VStack(alignment: .leading) {
+                Toggle("Workspace Overview on Swipe Up", isOn: $swipeUpOverviewEnabled)
+                Text("Swipe up to see all workspaces and their apps")
+                    .foregroundStyle(.secondary)
+                if swipeUpOverviewEnabled {
+                    Picker("Swipe Up Fingers:", selection: $swipeUpFingers) {
+                        ForEach(numbers, id: \.self) {
+                            Text($0)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 200)
+                    .padding(.top, 4)
                 }
             }.padding(.vertical, 4)
 
