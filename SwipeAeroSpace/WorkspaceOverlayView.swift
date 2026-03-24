@@ -163,7 +163,11 @@ class OverlayPanelController {
         let height = max(intrinsicSize.height, 200)
         hostingView.setFrameSize(NSSize(width: width, height: height))
 
-        guard let screen = NSScreen.main else { return }
+        // Show on the screen where the cursor is
+        let mouseLocation = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first(where: {
+            NSPointInRect(mouseLocation, $0.frame)
+        }) ?? NSScreen.main ?? NSScreen.screens.first!
         let screenFrame = screen.visibleFrame
 
         let panelWidth = min(width, screenFrame.width * 0.9)
@@ -183,6 +187,10 @@ class OverlayPanelController {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = true
+
+        hostingView.wantsLayer = true
+        hostingView.layer?.cornerRadius = 16
+        hostingView.layer?.masksToBounds = true
         panel.contentView = hostingView
 
         // Activate the app briefly so the panel can receive key events
