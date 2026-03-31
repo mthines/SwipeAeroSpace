@@ -112,6 +112,7 @@ class SwipeManager {
     private var prevTouchPositions: [String: NSPoint] = [:]
     private var state: GestureState = .ended
     private var swipeAxis: SwipeAxis = .undecided
+    private var activeFingerCount: Int = 0
     private var socket: Socket? = nil
     private let workQueue = DispatchQueue(label: "swipe.workspace", qos: .userInteractive)
     private let overlayController = OverlayPanelController()
@@ -208,18 +209,43 @@ class SwipeManager {
             in: .whitespacesAndNewlines
         ) ?? ""
 
-        // Get all non-empty workspaces on all monitors
+        // Get monitor names
+        let monitorResult = runCommand(
+            args: [
+                "list-monitors", "--format", "%{monitor-id}|%{monitor-name}",
+            ],
+            stdin: ""
+        )
+        var monitorNames: [String: String] = [:]
+        if let monitorOutput = try? monitorResult.get() {
+            for line in monitorOutput.split(separator: "\n") {
+                let parts = line.split(separator: "|", maxSplits: 1)
+                if parts.count == 2 {
+                    monitorNames[String(parts[0])] = String(parts[1])
+                }
+            }
+        }
+
+        // Get all non-empty workspaces on all monitors (with monitor IDs)
         let allResult = runCommand(
-            args: ["list-workspaces", "--monitor", "all", "--empty", "no"],
+            args: [
+                "list-workspaces", "--monitor", "all", "--empty", "no",
+                "--format", "%{workspace}|%{monitor-id}",
+            ],
             stdin: ""
         )
         guard let allOutput = try? allResult.get() else { return [] }
-        let wsNames = allOutput.split(separator: "\n").map(String.init)
+        let wsEntries: [(name: String, monitorId: String)] =
+            allOutput.split(separator: "\n").compactMap { line in
+                let parts = line.split(separator: "|", maxSplits: 1)
+                guard parts.count == 2 else { return nil }
+                return (name: String(parts[0]), monitorId: String(parts[1]))
+            }
 
-        return wsNames.compactMap { wsName in
+        return wsEntries.compactMap { entry in
             let winResult = runCommand(
                 args: [
-                    "list-windows", "--workspace", wsName,
+                    "list-windows", "--workspace", entry.name,
                     "--format", "%{app-name}|%{window-title}",
                 ],
                 stdin: ""
@@ -232,7 +258,7 @@ class SwipeManager {
                     idx, line in
                     let parts = line.split(separator: "|", maxSplits: 1)
                     return WindowInfo(
-                        id: "\(wsName)-\(idx)",
+                        id: "\(entry.name)-\(idx)",
                         appName: parts.first.map(String.init) ?? "Unknown",
                         windowTitle: parts.count > 1
                             ? String(parts[1]) : ""
@@ -242,9 +268,11 @@ class SwipeManager {
                 windows = []
             }
             return WorkspaceInfo(
-                id: wsName,
+                id: entry.name,
                 windows: windows,
-                isFocused: wsName == focusedWs
+                isFocused: entry.name == focusedWs,
+                monitorId: entry.monitorId,
+                monitorName: monitorNames[entry.monitorId] ?? "Monitor \(entry.monitorId)"
             )
         }
     }
@@ -413,6 +441,7 @@ class SwipeManager {
         let vFingerCount = swipeUpFingers == "Three" ? 3 : 4
         if state != .began && (count == hFingerCount || count == vFingerCount) {
             state = .began
+            activeFingerCount = count
         }
         if state == .began {
             let (disX, disY) = swipeDistance(touches: touches)
@@ -428,19 +457,48 @@ class SwipeManager {
                 }
             }
 
-            // Fire swipe-up overview as soon as threshold is crossed
-            if swipeAxis == .vertical && !swipeUpFired && swipeUpOverviewEnabled {
+            // Vertical swipes: only fire if finger count matches overview setting
+            if swipeAxis == .vertical && swipeUpOverviewEnabled
+                && activeFingerCount == vFingerCount
+            {
                 let threshold = Float(swipeThreshold) * 0.5
-                if accDisY > threshold {
+                if !swipeUpFired && accDisY > threshold {
                     swipeUpFired = true
-                    showWorkspaceOverview()
+                    if !overlayController.isVisible {
+                        showWorkspaceOverview()
+                    }
+                }
+                // Mid-gesture: swipe back down dismisses when accDisY reverses
+                if swipeUpFired && accDisY < threshold * 0.5 {
+                    swipeUpFired = false
+                    DispatchQueue.main.async { [weak self] in
+                        self?.overlayController.dismiss()
+                    }
+                }
+                // New gesture: swipe down dismisses if overlay is already open
+                if !swipeUpFired && accDisY < -threshold
+                    && overlayController.isVisible
+                {
+                    swipeUpFired = true
+                    DispatchQueue.main.async { [weak self] in
+                        self?.overlayController.dismiss()
+                    }
                 }
             }
 
             // Only fire horizontal workspace switches for horizontal swipes
             if swipeAxis == .horizontal && multiSwipeEnabled {
                 let threshold = Float(swipeThreshold)
-                let rawPosition = Int(accDisX / threshold)
+                // Each additional step requires 1.5x more distance to avoid
+                // accidental multi-switches on long single swipes
+                let dist = abs(accDisX)
+                var steps = 0
+                var nextBoundary = threshold
+                while dist >= nextBoundary && steps < maxSteps {
+                    steps += 1
+                    nextBoundary += threshold * (1.0 + 0.5 * Float(steps))
+                }
+                let rawPosition = accDisX >= 0 ? steps : -steps
                 let targetPosition = max(-maxSteps, min(maxSteps, rawPosition))
                 let delta = targetPosition - firedPosition
 
@@ -475,6 +533,7 @@ class SwipeManager {
         firedPosition = 0
         swipeUpFired = false
         swipeAxis = .undecided
+        activeFingerCount = 0
         prevTouchPositions.removeAll()
     }
 

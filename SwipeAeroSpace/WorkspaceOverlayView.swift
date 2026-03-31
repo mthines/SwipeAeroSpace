@@ -5,6 +5,8 @@ struct WorkspaceInfo: Identifiable {
     let id: String  // workspace name
     let windows: [WindowInfo]
     let isFocused: Bool
+    let monitorId: String
+    let monitorName: String
 }
 
 struct WindowInfo: Identifiable {
@@ -13,20 +15,56 @@ struct WindowInfo: Identifiable {
     let windowTitle: String
 }
 
+class OverlayState: ObservableObject {
+    @Published var hoveredWorkspace: String? = nil
+}
+
 struct WorkspaceOverlayView: View {
     let workspaces: [WorkspaceInfo]
     let onSelect: (String) -> Void
     let onPreview: (String) -> Void
     let onDismiss: () -> Void
+    @ObservedObject var overlayState: OverlayState
     @State private var appeared = false
-    @State private var hoveredWorkspace: String? = nil
     @State private var revertTask: DispatchWorkItem? = nil
 
     private let maxColumns = 5
+    private var focusedMonitorId: String? {
+        workspaces.first(where: { $0.isFocused })?.monitorId
+    }
+    private var hasMultipleMonitors: Bool {
+        Set(workspaces.map(\.monitorId)).count > 1
+    }
 
-    private var rows: [[WorkspaceInfo]] {
-        stride(from: 0, to: workspaces.count, by: maxColumns).map {
-            Array(workspaces[$0..<min($0 + maxColumns, workspaces.count)])
+    private struct MonitorGroup: Identifiable {
+        let id: String  // monitorId
+        let name: String
+        let workspaces: [WorkspaceInfo]
+    }
+
+    private var monitorGroups: [MonitorGroup] {
+        var seen: [String: Int] = [:]
+        var groups: [MonitorGroup] = []
+        for ws in workspaces {
+            if let idx = seen[ws.monitorId] {
+                groups[idx] = MonitorGroup(
+                    id: groups[idx].id,
+                    name: groups[idx].name,
+                    workspaces: groups[idx].workspaces + [ws]
+                )
+            } else {
+                seen[ws.monitorId] = groups.count
+                groups.append(MonitorGroup(
+                    id: ws.monitorId, name: ws.monitorName, workspaces: [ws]
+                ))
+            }
+        }
+        return groups
+    }
+
+    private func rows(for items: [WorkspaceInfo]) -> [[WorkspaceInfo]] {
+        stride(from: 0, to: items.count, by: maxColumns).map {
+            Array(items[$0..<min($0 + maxColumns, items.count)])
         }
     }
 
@@ -36,29 +74,56 @@ struct WorkspaceOverlayView: View {
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundStyle(.secondary)
 
-            VStack(spacing: 8) {
-                ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                    HStack(alignment: .top, spacing: 10) {
-                        ForEach(row) { ws in
-                            WorkspaceCard(
-                                workspace: ws,
-                                isHoveredExternally: hoveredWorkspace == ws.id
-                            )
-                            .onTapGesture { onSelect(ws.id) }
-                            .onHover { hovering in
-                                if hovering {
-                                    revertTask?.cancel()
-                                    revertTask = nil
-                                    hoveredWorkspace = ws.id
-                                    onPreview(ws.id)
-                                } else if hoveredWorkspace == ws.id {
-                                    hoveredWorkspace = nil
-                                    let task = DispatchWorkItem {
-                                        onDismiss()
+            VStack(spacing: hasMultipleMonitors ? 16 : 8) {
+                ForEach(monitorGroups) { group in
+                    VStack(spacing: 8) {
+                        if hasMultipleMonitors {
+                            HStack {
+                                Rectangle()
+                                    .fill(.secondary.opacity(0.3))
+                                    .frame(height: 1)
+                                Text(group.name)
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                Rectangle()
+                                    .fill(.secondary.opacity(0.3))
+                                    .frame(height: 1)
+                            }
+                        }
+                        ForEach(
+                            Array(rows(for: group.workspaces).enumerated()),
+                            id: \.offset
+                        ) { _, row in
+                            HStack(alignment: .top, spacing: 10) {
+                                ForEach(row) { ws in
+                                    Button { onSelect(ws.id) } label: {
+                                        WorkspaceCard(
+                                            workspace: ws,
+                                            isHoveredExternally: overlayState.hoveredWorkspace
+                                                == ws.id
+                                        )
                                     }
-                                    revertTask = task
-                                    DispatchQueue.main.asyncAfter(
-                                        deadline: .now() + 0.08, execute: task)
+                                    .buttonStyle(.plain)
+                                    .onHover { hovering in
+                                        if hovering {
+                                            revertTask?.cancel()
+                                            revertTask = nil
+                                            overlayState.hoveredWorkspace = ws.id
+                                            if ws.monitorId == focusedMonitorId {
+                                                onPreview(ws.id)
+                                            }
+                                        } else if overlayState.hoveredWorkspace == ws.id {
+                                            overlayState.hoveredWorkspace = nil
+                                            let task = DispatchWorkItem {
+                                                onDismiss()
+                                            }
+                                            revertTask = task
+                                            DispatchQueue.main.asyncAfter(
+                                                deadline: .now() + 0.08,
+                                                execute: task)
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -155,13 +220,28 @@ struct WorkspaceCard: View {
 
 class KeyablePanel: NSPanel {
     override var canBecomeKey: Bool { true }
+
+    override func sendEvent(_ event: NSEvent) {
+        // On mouse-down, make key first so SwiftUI receives the click immediately
+        if event.type == .leftMouseDown || event.type == .rightMouseDown {
+            makeKey()
+        }
+        super.sendEvent(event)
+    }
+}
+
+class FirstClickView: NSView {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
 class OverlayPanelController {
+    private(set) var isVisible: Bool = false
     private var panel: NSPanel?
     private var localMonitor: Any?
     private var globalMonitor: Any?
     private var onDismissCallback: (() -> Void)?
+    private var onSelectCallback: ((String) -> Void)?
+    private let overlayState = OverlayState()
 
     func show(
         workspaces: [WorkspaceInfo],
@@ -170,20 +250,25 @@ class OverlayPanelController {
         onRevert: @escaping () -> Void
     ) {
         dismiss()
+        isVisible = true
+
+        let selectHandler: (String) -> Void = { [weak self] ws in
+            self?.onDismissCallback = nil  // Don't revert on select
+            onSelect(ws)
+            self?.dismiss()
+        }
+        self.onSelectCallback = selectHandler
 
         let view = WorkspaceOverlayView(
             workspaces: workspaces,
-            onSelect: { [weak self] ws in
-                self?.onDismissCallback = nil  // Don't revert on select
-                onSelect(ws)
-                self?.dismiss()
-            },
+            onSelect: selectHandler,
             onPreview: { ws in
                 onPreview(ws)
             },
             onDismiss: {
                 onRevert()
-            }
+            },
+            overlayState: overlayState
         )
 
         self.onDismissCallback = onRevert
@@ -195,6 +280,12 @@ class OverlayPanelController {
         let width = max(intrinsicSize.width, 400)
         let height = max(intrinsicSize.height, 200)
         hostingView.setFrameSize(NSSize(width: width, height: height))
+
+        // Wrap in a view that accepts first mouse click without requiring activation
+        let wrapper = FirstClickView(frame: hostingView.frame)
+        hostingView.frame = wrapper.bounds
+        hostingView.autoresizingMask = [.width, .height]
+        wrapper.addSubview(hostingView)
 
         // Show on the screen where the cursor is
         let mouseLocation = NSEvent.mouseLocation
@@ -221,17 +312,16 @@ class OverlayPanelController {
         panel.backgroundColor = .clear
         panel.hasShadow = true
 
-        hostingView.wantsLayer = true
-        hostingView.layer?.cornerRadius = 16
-        hostingView.layer?.masksToBounds = true
-        panel.contentView = hostingView
+        wrapper.wantsLayer = true
+        wrapper.layer?.cornerRadius = 16
+        wrapper.layer?.masksToBounds = true
+        panel.contentView = wrapper
 
-        // Activate the app briefly so the panel can receive key events
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         self.panel = panel
 
-        // Local monitor catches Escape when the panel is key
+        // Local monitor catches Escape and clicks when the panel is key
         localMonitor = NSEvent.addLocalMonitorForEvents(
             matching: [.keyDown, .leftMouseDown, .rightMouseDown]
         ) { [weak self] event in
@@ -245,6 +335,10 @@ class OverlayPanelController {
                     !NSPointInRect(screenPoint, panel.frame)
                 {
                     self?.dismiss()
+                } else if let ws = self?.overlayState.hoveredWorkspace {
+                    // Select the hovered workspace on first click
+                    self?.onSelectCallback?(ws)
+                    return nil
                 }
             }
             return event
@@ -265,8 +359,11 @@ class OverlayPanelController {
     }
 
     func dismiss() {
+        isVisible = false
         onDismissCallback?()
         onDismissCallback = nil
+        onSelectCallback = nil
+        overlayState.hoveredWorkspace = nil
         panel?.orderOut(nil)
         panel = nil
         if let localMonitor = localMonitor {
