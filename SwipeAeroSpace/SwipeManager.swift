@@ -92,7 +92,7 @@ extension Result {
 
 class SwipeManager {
     // user settings
-    @AppStorage("threshold") private var swipeThreshold: Double = 0.3
+    @AppStorage("threshold") private var swipeThreshold: Double = 0.15
     @AppStorage("wrap") private var wrapWorkspace: Bool = false
     @AppStorage("natrual") private var naturalSwipe: Bool = true
     @AppStorage("skip-empty") private var skipEmpty: Bool = false
@@ -489,16 +489,7 @@ class SwipeManager {
             // Only fire horizontal workspace switches for horizontal swipes
             if swipeAxis == .horizontal && multiSwipeEnabled {
                 let threshold = Float(swipeThreshold)
-                // Each additional step requires 1.5x more distance to avoid
-                // accidental multi-switches on long single swipes
-                let dist = abs(accDisX)
-                var steps = 0
-                var nextBoundary = threshold
-                while dist >= nextBoundary && steps < maxSteps {
-                    steps += 1
-                    nextBoundary += threshold * (1.0 + 0.5 * Float(steps))
-                }
-                let rawPosition = accDisX >= 0 ? steps : -steps
+                let rawPosition = Int(accDisX / threshold)
                 let targetPosition = max(-maxSteps, min(maxSteps, rawPosition))
                 let delta = targetPosition - firedPosition
 
