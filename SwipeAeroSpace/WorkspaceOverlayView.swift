@@ -17,23 +17,24 @@ struct WindowInfo: Identifiable {
 
 class OverlayState: ObservableObject {
     @Published var hoveredWorkspace: String? = nil
+    @Published var workspaces: [WorkspaceInfo] = []
+    @Published var visible: Bool = false
+    @Published var focusedMonitorId: String? = nil
 }
 
 struct WorkspaceOverlayView: View {
-    let workspaces: [WorkspaceInfo]
     let onSelect: (String) -> Void
     let onPreview: (String) -> Void
     let onDismiss: () -> Void
     @ObservedObject var overlayState: OverlayState
-    @State private var appeared = false
     @State private var revertTask: DispatchWorkItem? = nil
 
     private let maxColumns = 5
     private var focusedMonitorId: String? {
-        workspaces.first(where: { $0.isFocused })?.monitorId
+        overlayState.focusedMonitorId
     }
     private var hasMultipleMonitors: Bool {
-        Set(workspaces.map(\.monitorId)).count > 1
+        Set(overlayState.workspaces.map(\.monitorId)).count > 1
     }
 
     private struct MonitorGroup: Identifiable {
@@ -45,7 +46,7 @@ struct WorkspaceOverlayView: View {
     private var monitorGroups: [MonitorGroup] {
         var seen: [String: Int] = [:]
         var groups: [MonitorGroup] = []
-        for ws in workspaces {
+        for ws in overlayState.workspaces {
             if let idx = seen[ws.monitorId] {
                 groups[idx] = MonitorGroup(
                     id: groups[idx].id,
@@ -135,13 +136,14 @@ struct WorkspaceOverlayView: View {
         .background(.ultraThinMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 16))
         .shadow(radius: 20)
-        .opacity(appeared ? 1 : 0)
-        .offset(y: appeared ? 0 : 8)
-        .scaleEffect(appeared ? 1 : 0.98)
+        .padding(24)
+        .opacity(overlayState.visible ? 1 : 0)
+        .offset(y: overlayState.visible ? 0 : 8)
+        .scaleEffect(overlayState.visible ? 1 : 0.98)
         .onExitCommand { onDismiss() }
         .onAppear {
-            withAnimation(.easeOut(duration: 0.06)) {
-                appeared = true
+            withAnimation(.easeOut(duration: 0.15)) {
+                overlayState.visible = true
             }
         }
     }
@@ -245,12 +247,15 @@ class OverlayPanelController {
 
     func show(
         workspaces: [WorkspaceInfo],
+        focusedMonitorId: String? = nil,
         onSelect: @escaping (String) -> Void,
         onPreview: @escaping (String) -> Void,
         onRevert: @escaping () -> Void
     ) {
         dismiss()
         isVisible = true
+        overlayState.visible = false
+        overlayState.focusedMonitorId = focusedMonitorId
 
         let selectHandler: (String) -> Void = { [weak self] ws in
             self?.onDismissCallback = nil  // Don't revert on select
@@ -258,9 +263,9 @@ class OverlayPanelController {
             self?.dismiss()
         }
         self.onSelectCallback = selectHandler
+        overlayState.workspaces = workspaces
 
         let view = WorkspaceOverlayView(
-            workspaces: workspaces,
             onSelect: selectHandler,
             onPreview: { ws in
                 onPreview(ws)
@@ -310,11 +315,8 @@ class OverlayPanelController {
         panel.level = .floating
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.hasShadow = true
+        panel.hasShadow = false
 
-        wrapper.wantsLayer = true
-        wrapper.layer?.cornerRadius = 16
-        wrapper.layer?.masksToBounds = true
         panel.contentView = wrapper
 
         NSApp.activate(ignoringOtherApps: true)
@@ -358,14 +360,29 @@ class OverlayPanelController {
         }
     }
 
+    func update(workspaces: [WorkspaceInfo]) {
+        overlayState.workspaces = workspaces
+    }
+
     func dismiss() {
+        guard isVisible else { return }
         isVisible = false
         onDismissCallback?()
         onDismissCallback = nil
         onSelectCallback = nil
         overlayState.hoveredWorkspace = nil
-        panel?.orderOut(nil)
-        panel = nil
+        overlayState.focusedMonitorId = nil
+
+        // Animate out, then tear down
+        withAnimation(.easeIn(duration: 0.1)) {
+            overlayState.visible = false
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [self] in
+            overlayState.workspaces = []
+            panel?.orderOut(nil)
+            panel = nil
+        }
+
         if let localMonitor = localMonitor {
             NSEvent.removeMonitor(localMonitor)
             self.localMonitor = nil

@@ -92,7 +92,8 @@ extension Result {
 
 class SwipeManager {
     // user settings
-    @AppStorage("threshold") private var swipeThreshold: Double = 0.15
+    @AppStorage("threshold") private var swipeThreshold: Double = 1.0
+    private var internalThreshold: Float { Float(swipeThreshold) * 0.05 }
     @AppStorage("wrap") private var wrapWorkspace: Bool = false
     @AppStorage("natrual") private var naturalSwipe: Bool = true
     @AppStorage("skip-empty") private var skipEmpty: Bool = false
@@ -113,6 +114,8 @@ class SwipeManager {
     private var state: GestureState = .ended
     private var swipeAxis: SwipeAxis = .undecided
     private var activeFingerCount: Int = 0
+    private var gestureFocusDone: Bool = false
+    private var pendingSwipeWork: DispatchWorkItem? = nil
     private var socket: Socket? = nil
     private let workQueue = DispatchQueue(label: "swipe.workspace", qos: .userInteractive)
     private let overlayController = OverlayPanelController()
@@ -174,34 +177,58 @@ class SwipeManager {
     func showWorkspaceOverview() {
         workQueue.async { [weak self] in
             guard let self = self else { return }
-            let workspaces = self.queryWorkspaces()
-            let originalWs = workspaces.first(where: { $0.isFocused })?.id
-            DispatchQueue.main.async {
-                self.overlayController.show(
-                    workspaces: workspaces,
-                    onSelect: { [weak self] wsName in
+            // Phase 1: quick query (3 socket calls) — show immediately
+            let (shellWorkspaces, originalWs, focusedMonitorId) = self.queryWorkspacesShell()
+            let originalWsOpt: String? = originalWs.isEmpty ? nil : originalWs
+
+            let makeCallbacks: () -> (
+                onSelect: (String) -> Void,
+                onPreview: (String) -> Void,
+                onRevert: () -> Void
+            ) = { [weak self] in
+                (
+                    onSelect: { wsName in
                         self?.workQueue.async {
                             _ = self?.runCommand(args: ["workspace", wsName], stdin: "")
                         }
                     },
-                    onPreview: { [weak self] wsName in
+                    onPreview: { wsName in
                         self?.workQueue.async {
                             _ = self?.runCommand(args: ["workspace", wsName], stdin: "")
                         }
                     },
-                    onRevert: { [weak self] in
-                        guard let originalWs = originalWs else { return }
+                    onRevert: {
+                        guard let originalWs = originalWsOpt else { return }
                         self?.workQueue.async {
                             _ = self?.runCommand(args: ["workspace", originalWs], stdin: "")
                         }
                     }
                 )
             }
+
+            let cb = makeCallbacks()
+            DispatchQueue.main.async {
+                self.overlayController.show(
+                    workspaces: shellWorkspaces,
+                    focusedMonitorId: focusedMonitorId,
+                    onSelect: cb.onSelect,
+                    onPreview: cb.onPreview,
+                    onRevert: cb.onRevert
+                )
+            }
+
+            // Phase 2: fetch window details and update in place
+            let fullWorkspaces = self.queryWindows(for: shellWorkspaces)
+            DispatchQueue.main.async {
+                guard self.overlayController.isVisible else { return }
+                self.overlayController.update(workspaces: fullWorkspaces)
+            }
         }
     }
 
-    private func queryWorkspaces() -> [WorkspaceInfo] {
-        // Get focused workspace
+    /// Quick query: workspace names, monitors, focused state (4 socket calls)
+    /// Returns (workspaces, focusedWorkspaceName, focusedMonitorId)
+    private func queryWorkspacesShell() -> ([WorkspaceInfo], String, String?) {
         let focusedResult = runCommand(
             args: ["list-workspaces", "--focused"], stdin: ""
         )
@@ -209,7 +236,15 @@ class SwipeManager {
             in: .whitespacesAndNewlines
         ) ?? ""
 
-        // Get monitor names
+        // Get the monitor ID for the focused workspace
+        let focusedMonitorResult = runCommand(
+            args: ["list-workspaces", "--focused", "--format", "%{monitor-id}"],
+            stdin: ""
+        )
+        let focusedMonitorId = (try? focusedMonitorResult.get())?.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+
         let monitorResult = runCommand(
             args: [
                 "list-monitors", "--format", "%{monitor-id}|%{monitor-name}",
@@ -226,7 +261,6 @@ class SwipeManager {
             }
         }
 
-        // Get all non-empty workspaces on all monitors (with monitor IDs)
         let allResult = runCommand(
             args: [
                 "list-workspaces", "--monitor", "all", "--empty", "no",
@@ -234,18 +268,30 @@ class SwipeManager {
             ],
             stdin: ""
         )
-        guard let allOutput = try? allResult.get() else { return [] }
-        let wsEntries: [(name: String, monitorId: String)] =
-            allOutput.split(separator: "\n").compactMap { line in
-                let parts = line.split(separator: "|", maxSplits: 1)
-                guard parts.count == 2 else { return nil }
-                return (name: String(parts[0]), monitorId: String(parts[1]))
-            }
+        guard let allOutput = try? allResult.get() else { return ([], focusedWs, focusedMonitorId) }
 
-        return wsEntries.compactMap { entry in
+        let workspaces: [WorkspaceInfo] = allOutput.split(separator: "\n").compactMap { line in
+            let parts = line.split(separator: "|", maxSplits: 1)
+            guard parts.count == 2 else { return nil }
+            let name = String(parts[0])
+            let monitorId = String(parts[1])
+            return WorkspaceInfo(
+                id: name,
+                windows: [],
+                isFocused: name == focusedWs,
+                monitorId: monitorId,
+                monitorName: monitorNames[monitorId] ?? "Monitor \(monitorId)"
+            )
+        }
+        return (workspaces, focusedWs, focusedMonitorId)
+    }
+
+    /// Fetch window details for a list of workspaces (1 socket call per workspace)
+    private func queryWindows(for workspaces: [WorkspaceInfo]) -> [WorkspaceInfo] {
+        return workspaces.map { ws in
             let winResult = runCommand(
                 args: [
-                    "list-windows", "--workspace", entry.name,
+                    "list-windows", "--workspace", ws.id,
                     "--format", "%{app-name}|%{window-title}",
                 ],
                 stdin: ""
@@ -258,7 +304,7 @@ class SwipeManager {
                     idx, line in
                     let parts = line.split(separator: "|", maxSplits: 1)
                     return WindowInfo(
-                        id: "\(entry.name)-\(idx)",
+                        id: "\(ws.id)-\(idx)",
                         appName: parts.first.map(String.init) ?? "Unknown",
                         windowTitle: parts.count > 1
                             ? String(parts[1]) : ""
@@ -268,11 +314,11 @@ class SwipeManager {
                 windows = []
             }
             return WorkspaceInfo(
-                id: entry.name,
+                id: ws.id,
                 windows: windows,
-                isFocused: entry.name == focusedWs,
-                monitorId: entry.monitorId,
-                monitorName: monitorNames[entry.monitorId] ?? "Monitor \(entry.monitorId)"
+                isFocused: ws.isFocused,
+                monitorId: ws.monitorId,
+                monitorName: ws.monitorName
             )
         }
     }
@@ -443,6 +489,11 @@ class SwipeManager {
             state = .began
             activeFingerCount = count
         }
+        // Update finger count while axis is still undecided — touch count
+        // can fluctuate as fingers land, so use the latest stable count
+        if state == .began && swipeAxis == .undecided {
+            activeFingerCount = count
+        }
         if state == .began {
             let (disX, disY) = swipeDistance(touches: touches)
             accDisX += disX
@@ -450,7 +501,7 @@ class SwipeManager {
 
             // Lock axis once we have enough movement
             if swipeAxis == .undecided {
-                let threshold = Float(swipeThreshold) * 0.3
+                let threshold = internalThreshold * 0.3
                 if abs(accDisX) > threshold || abs(accDisY) > threshold {
                     swipeAxis =
                         abs(accDisY) > abs(accDisX) ? .vertical : .horizontal
@@ -461,7 +512,7 @@ class SwipeManager {
             if swipeAxis == .vertical && swipeUpOverviewEnabled
                 && activeFingerCount == vFingerCount
             {
-                let threshold = Float(swipeThreshold) * 0.5
+                let threshold = internalThreshold * 0.5
                 if !swipeUpFired && accDisY > threshold {
                     swipeUpFired = true
                     if !overlayController.isVisible {
@@ -488,7 +539,7 @@ class SwipeManager {
 
             // Only fire horizontal workspace switches for horizontal swipes
             if swipeAxis == .horizontal && multiSwipeEnabled {
-                let threshold = Float(swipeThreshold)
+                let threshold = internalThreshold
                 let rawPosition = Int(accDisX / threshold)
                 let targetPosition = max(-maxSteps, min(maxSteps, rawPosition))
                 let delta = targetPosition - firedPosition
@@ -502,10 +553,39 @@ class SwipeManager {
                     }
                     let stepsToFire = abs(delta)
                     firedPosition = targetPosition
-                    workQueue.async { [weak self] in
+
+                    // Cancel any pending work so we don't overshoot
+                    pendingSwipeWork?.cancel()
+
+                    let workItem = DispatchWorkItem { [weak self] in
                         guard let self = self else { return }
+
+                        // Focus the workspace under the cursor once per gesture
+                        if !self.gestureFocusDone {
+                            let res = self.runCommand(
+                                args: ["list-workspaces", "--monitor", "mouse", "--visible"],
+                                stdin: ""
+                            )
+                            if let mouseWs = try? res.get() {
+                                _ = self.runCommand(args: ["workspace", mouseWs], stdin: "")
+                            }
+                            self.gestureFocusDone = true
+                        }
+
+                        // Fire only the lean next/prev calls
                         for _ in 0..<stepsToFire {
-                            switch self.switchWorkspace(direction: direction) {
+                            var args = ["workspace", direction.value]
+                            var stdin = ""
+                            if self.wrapWorkspace {
+                                args.append("--wrap-around")
+                            }
+                            if self.skipEmpty {
+                                if let ws = try? self.getNonEmptyWorkspaces().get(), !ws.isEmpty {
+                                    stdin = ws
+                                    args.append("--stdin")
+                                }
+                            }
+                            switch self.runCommand(args: args, stdin: stdin) {
                             case .success: continue
                             case .failure(let err):
                                 self.logger.error("\(err.localizedDescription)")
@@ -513,6 +593,8 @@ class SwipeManager {
                             }
                         }
                     }
+                    pendingSwipeWork = workItem
+                    workQueue.async(execute: workItem)
                 }
             }
         }
@@ -525,6 +607,7 @@ class SwipeManager {
         swipeUpFired = false
         swipeAxis = .undecided
         activeFingerCount = 0
+        gestureFocusDone = false
         prevTouchPositions.removeAll()
     }
 
@@ -533,7 +616,7 @@ class SwipeManager {
         if multiSwipeEnabled {
             return
         }
-        let threshold = Float(swipeThreshold)
+        let threshold = internalThreshold
         if abs(accDisX) < threshold {
             return
         }
@@ -560,6 +643,7 @@ class SwipeManager {
         var allDown = true
         var sumDisX = Float(0)
         var sumDisY = Float(0)
+        var activeTouches = 0
         for touch in touches {
             let (disX, disY) = touchDistance(touch)
             allRight = allRight && disX >= 0
@@ -574,11 +658,15 @@ class SwipeManager {
             } else {
                 prevTouchPositions["\(touch.identity)"] =
                     touch.normalizedPosition
+                activeTouches += 1
             }
         }
 
-        var resultX = sumDisX
-        var resultY = sumDisY
+        // Average across fingers so threshold behaves consistently
+        // regardless of finger count
+        let count = max(activeTouches, 1)
+        var resultX = sumDisX / Float(count)
+        var resultY = sumDisY / Float(count)
 
         // All fingers should move in the same direction for each axis.
         if !allRight && !allLeft {

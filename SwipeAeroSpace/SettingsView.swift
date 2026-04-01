@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct SettingsView: View {
-    @AppStorage("threshold") private static var swipeThreshold: Double = 0.3
+    @AppStorage("threshold") private static var swipeThreshold: Double = 1.0
     @AppStorage("wrap") private var wrapWorkspace: Bool = false
     @AppStorage("natrual") private var naturalSwipe: Bool = true
     @AppStorage("skip-empty") private var skipEmpty: Bool = false
@@ -17,73 +17,101 @@ struct SettingsView: View {
         return nf
     }()
 
-    let numbers = ["Three", "Four"]
+    let fingerOptions = ["Three", "Four"]
 
     var swipeManager: SwipeManager
     @ObservedObject var socketInfo: SocketInfo
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            VStack(alignment: .leading) {
-                HStack {
-                    Text("Socket Status: ")
-                    Image(systemName: "circle.fill").foregroundStyle(
-                        socketInfo.socketConnected ? .green : .red
-                    )
+        VStack(alignment: .leading, spacing: 0) {
+
+            // MARK: - Connection
+            sectionHeader("Connection")
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 6) {
+                    Image(systemName: "circle.fill")
+                        .font(.system(size: 8))
+                        .foregroundStyle(socketInfo.socketConnected ? .green : .red)
+                    Text(socketInfo.socketConnected ? "Connected to AeroSpace" : "Not connected")
                 }
                 if !socketInfo.socketConnected {
-                    Button("Try to connect socket") {
+                    Button("Reconnect") {
                         swipeManager.connectSocket(reconnect: true)
                     }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
                 }
             }
-            Form {
-                TextField(
-                    "Swipe Threshold",
-                    value: SettingsView.$swipeThreshold,
-                    formatter: numberFormatter,
-                    prompt: Text("0.3")
-                ).textFieldStyle(RoundedBorderTextFieldStyle()).frame(
-                    maxWidth: 200
-                )
-            }
+            .padding(.horizontal, 32)
+            .padding(.bottom, 16)
 
-            Picker("Number of Fingers:", selection: $fingers) {
-                ForEach(numbers, id: \.self) {
-                    Text($0)
+            sectionDivider()
+
+            // MARK: - Horizontal Swipe
+            sectionHeader("Horizontal Swipe")
+            VStack(alignment: .leading, spacing: 12) {
+                settingRow(
+                    title: "Sensitivity",
+                    description: "Lower values require less finger movement to switch. Default: 1.0"
+                ) {
+                    TextField(
+                        "Sensitivity",
+                        value: SettingsView.$swipeThreshold,
+                        formatter: numberFormatter,
+                        prompt: Text("1.0")
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 80)
                 }
-            }
-            .pickerStyle(.segmented)
-            .frame(maxWidth: 400)
-            .padding(.vertical, 4)
 
-            VStack(alignment: .leading) {
-                Toggle("Wrap Workspace", isOn: $wrapWorkspace)
-                Text("Enable to jump between first and last workspaces")
-                    .foregroundStyle(.secondary)
-            }.padding(.vertical, 4)
+                settingRow(
+                    title: "Number of Fingers",
+                    description: "How many fingers trigger a horizontal workspace switch"
+                ) {
+                    Picker("", selection: $fingers) {
+                        ForEach(fingerOptions, id: \.self) { Text($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 140)
+                }
 
-            VStack(alignment: .leading) {
-                Toggle("Natural Swipe", isOn: $naturalSwipe)
-                Text("Disable to use reversed swipe ").foregroundStyle(
-                    .secondary
-                )
-            }.padding(.vertical, 4)
+                settingRow(
+                    title: "Natural Swipe",
+                    description: "Swipe direction matches finger movement, like trackpad scrolling"
+                ) {
+                    Toggle("", isOn: $naturalSwipe)
+                        .labelsHidden()
+                }
 
-            VStack(alignment: .leading) {
-                Toggle("Skip Empty Workspace", isOn: $skipEmpty)
-                Text("Enable to skip empty workspaces").foregroundStyle(
-                    .secondary
-                )
-            }.padding(.vertical, 4)
+                settingRow(
+                    title: "Wrap Around",
+                    description: "Swiping past the last workspace jumps back to the first"
+                ) {
+                    Toggle("", isOn: $wrapWorkspace)
+                        .labelsHidden()
+                }
 
-            VStack(alignment: .leading) {
-                Toggle("Multi-Workspace Swipe", isOn: $multiSwipeEnabled)
-                Text("Longer swipes jump multiple workspaces at once")
-                    .foregroundStyle(.secondary)
+                settingRow(
+                    title: "Skip Empty",
+                    description: "Only land on workspaces that have windows"
+                ) {
+                    Toggle("", isOn: $skipEmpty)
+                        .labelsHidden()
+                }
+
+                settingRow(
+                    title: "Multi-Workspace Swipe",
+                    description: "Longer swipes jump multiple workspaces in one gesture"
+                ) {
+                    Toggle("", isOn: $multiSwipeEnabled)
+                        .labelsHidden()
+                }
+
                 if multiSwipeEnabled {
-                    HStack {
-                        Text("Max workspaces per swipe: \(maxSteps)")
+                    settingRow(
+                        title: "Max per Swipe: \(maxSteps)",
+                        description: "Maximum number of workspaces a single swipe can jump"
+                    ) {
                         Slider(
                             value: Binding(
                                 get: { Double(maxSteps) },
@@ -91,34 +119,93 @@ struct SettingsView: View {
                             ),
                             in: 2...9,
                             step: 1
-                        ).frame(maxWidth: 200)
-                    }.padding(.top, 4)
-                }
-            }.padding(.vertical, 4)
-
-            VStack(alignment: .leading) {
-                Toggle("Workspace Overview on Swipe Up", isOn: $swipeUpOverviewEnabled)
-                Text("Swipe up to see all workspaces and their apps")
-                    .foregroundStyle(.secondary)
-                if swipeUpOverviewEnabled {
-                    Picker("Swipe Up Fingers:", selection: $swipeUpFingers) {
-                        ForEach(numbers, id: \.self) {
-                            Text($0)
-                        }
+                        )
+                        .frame(maxWidth: 140)
                     }
-                    .pickerStyle(.segmented)
-                    .frame(maxWidth: 200)
-                    .padding(.top, 4)
                 }
-            }.padding(.vertical, 4)
-
-            LaunchAtLogin.Toggle {
-                Text("Launch At Login")
             }
-        }
-        .padding(.horizontal, 32)
-        .padding(.vertical, 24)
+            .padding(.horizontal, 32)
+            .padding(.bottom, 16)
 
+            sectionDivider()
+
+            // MARK: - Workspace Overview
+            sectionHeader("Workspace Overview")
+            VStack(alignment: .leading, spacing: 12) {
+                settingRow(
+                    title: "Enable Overview",
+                    description: "Swipe up to see all workspaces and their apps"
+                ) {
+                    Toggle("", isOn: $swipeUpOverviewEnabled)
+                        .labelsHidden()
+                }
+
+                if swipeUpOverviewEnabled {
+                    settingRow(
+                        title: "Number of Fingers",
+                        description: "How many fingers trigger the workspace overview"
+                    ) {
+                        Picker("", selection: $swipeUpFingers) {
+                            ForEach(fingerOptions, id: \.self) { Text($0) }
+                        }
+                        .pickerStyle(.segmented)
+                        .frame(maxWidth: 140)
+                    }
+                }
+            }
+            .padding(.horizontal, 32)
+            .padding(.bottom, 16)
+
+            sectionDivider()
+
+            // MARK: - General
+            sectionHeader("General")
+            VStack(alignment: .leading, spacing: 12) {
+                LaunchAtLogin.Toggle {
+                    Text("Launch at Login")
+                }
+            }
+            .padding(.horizontal, 32)
+            .padding(.bottom, 24)
+        }
+        .padding(.vertical, 8)
+        .frame(width: 600)
+    }
+
+    // MARK: - Components
+
+    private func sectionHeader(_ title: String) -> some View {
+        Text(title)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(.secondary)
+            .textCase(.uppercase)
+            .padding(.horizontal, 32)
+            .padding(.top, 16)
+            .padding(.bottom, 8)
+    }
+
+    private func sectionDivider() -> some View {
+        Divider()
+            .padding(.horizontal, 24)
+    }
+
+    private func settingRow<Content: View>(
+        title: String,
+        description: String,
+        @ViewBuilder control: () -> Content
+    ) -> some View {
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 13))
+                Text(description)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+            control()
+        }
     }
 }
 
