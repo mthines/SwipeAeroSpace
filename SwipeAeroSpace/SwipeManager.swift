@@ -463,8 +463,7 @@ class SwipeManager {
         if touches.isEmpty {
             return
         }
-        let touchesCount =
-            touches.allSatisfy({ $0.phase == .ended }) ? 0 : touches.count
+        let touchesCount = touches.filter({ $0.phase != .ended }).count
         if touchesCount == 0 {
             stopGesture()
         } else {
