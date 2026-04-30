@@ -490,9 +490,19 @@ class SwipeManager {
             activeFingerCount = count
         }
         // Update finger count while axis is still undecided — touch count
-        // can fluctuate as fingers land, so use the latest stable count
+        // can fluctuate as fingers land, so use the latest stable count.
+        // If the count leaves the valid range (e.g. a 3-finger drag briefly
+        // bumps to 4 via .stationary touches), cancel the spurious latch so
+        // it cannot carry forward into the axis-lock and fire a wrong gesture.
         if state == .began && swipeAxis == .undecided {
-            activeFingerCount = count
+            if count == hFingerCount || count == vFingerCount {
+                activeFingerCount = count
+            } else {
+                // Spurious latch — finger count is outside the valid range.
+                state = .ended
+                clearEventState()
+                return
+            }
         }
         if state == .began {
             let (disX, disY) = swipeDistance(touches: touches)
@@ -538,7 +548,9 @@ class SwipeManager {
             }
 
             // Only fire horizontal workspace switches for horizontal swipes
-            if swipeAxis == .horizontal && multiSwipeEnabled {
+            // and only when the active finger count matches the configured
+            // finger count (mirrors the guard on the vertical/overview path).
+            if swipeAxis == .horizontal && multiSwipeEnabled && activeFingerCount == hFingerCount {
                 let threshold = internalThreshold
                 let rawPosition = Int(accDisX / threshold)
                 let targetPosition = max(-maxSteps, min(maxSteps, rawPosition))
