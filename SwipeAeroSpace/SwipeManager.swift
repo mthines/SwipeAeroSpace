@@ -463,8 +463,11 @@ class SwipeManager {
         if touches.isEmpty {
             return
         }
-        let touchesCount =
-            touches.allSatisfy({ $0.phase == .ended }) ? 0 : touches.count
+        // Count only active touches. macOS includes `.ended` (and sometimes
+        // `.stationary`) touches in the same event frame as moving fingers,
+        // which can briefly inflate the count and falsely latch the gesture
+        // (e.g. a 3-finger drag-to-select reporting count == 4 for one frame).
+        let touchesCount = touches.filter { $0.phase != .ended }.count
         if touchesCount == 0 {
             stopGesture()
         } else {
@@ -489,20 +492,17 @@ class SwipeManager {
             state = .began
             activeFingerCount = count
         }
-        // Update finger count while axis is still undecided — touch count
-        // can fluctuate as fingers land, so use the latest stable count.
-        // If the count leaves the valid range (e.g. a 3-finger drag briefly
-        // bumps to 4 via .stationary touches), cancel the spurious latch so
-        // it cannot carry forward into the axis-lock and fire a wrong gesture.
-        if state == .began && swipeAxis == .undecided {
-            if count == hFingerCount || count == vFingerCount {
-                activeFingerCount = count
-            } else {
-                // Spurious latch — finger count is outside the valid range.
-                state = .ended
-                clearEventState()
-                return
-            }
+        // While axis is still undecided, cancel the gesture if the active
+        // count drifts entirely outside the valid range (neither matches the
+        // horizontal nor the vertical finger count). Do NOT update
+        // `activeFingerCount` here — lowering it on a transient drop would
+        // silently swallow legitimate gestures where a finger briefly lifts.
+        if state == .began && swipeAxis == .undecided
+            && count != hFingerCount && count != vFingerCount
+        {
+            state = .ended
+            clearEventState()
+            return
         }
         if state == .began {
             let (disX, disY) = swipeDistance(touches: touches)
@@ -626,6 +626,12 @@ class SwipeManager {
     private func handleGesture() {
         // If multi-swipe is enabled, switches already fired live during the gesture
         if multiSwipeEnabled {
+            return
+        }
+        // Mirror the multi-swipe path's finger-count guard: only fire when
+        // the active count matches the configured horizontal finger count.
+        let hFingerCount = fingers == "Three" ? 3 : 4
+        if activeFingerCount != hFingerCount {
             return
         }
         let threshold = internalThreshold
